@@ -67,7 +67,7 @@ after(function (done) {
 
 
 
-describe.only('ConsumerStream', function () {
+describe('ConsumerStream', function () {
     it('should emit message when get new message', function (done) {
         var topics = [ { topic: EXISTS_TOPIC_1 } ],
             options = { autoCommit: false, groupId: '_groupId_1_test' };
