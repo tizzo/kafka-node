@@ -193,5 +193,46 @@ describe('ConsumerStream', function () {
         });
       });
     });
+    it.skip('should update the interval so that the consumer may resume where it left off', function (done) {
+      const groupId = '_commitStream_4_test';
+      const topic = COMMIT_STREAM_TOPIC_4;
+
+      var client = new Client(host);
+      var producer = new Producer(client);
+      producer.once('ready', function () {
+        createTopicAndProduceMessages(producer, topic, 19, function () {
+          var options = { autoCommit: true, autoCommitMsgCount: 10, groupId };
+          var consumer = new ConsumerStream(client, [topic], options);
+          let commitStream = consumer.createCommitStream();
+          commitStream.once('commitComplete', function (data) {
+            consumer.unpipe(commitStream);
+            client.sendOffsetFetchRequest(groupId, commitStream.topicPartionOffsets, function (error, data) {
+              if (error) {
+                throw error;
+              }
+              data[topic][0].should.equal(10);
+              commitStream.clearInterval();
+              consumer.close(function () {
+                var client2 = new Client(host);
+                client2.on('ready', function () {
+                  var consumer2 = new ConsumerStream(client2, [topic], options);
+                  consumer2.pipe(through2.obj(function (data, enc, cb) {
+                    console.log(`consumer 2: ${data.offset}, ${data}`);
+                    cb();
+                  }));
+                  setTimeout(done, 200);
+                });
+              });
+            });
+          });
+          consumer
+            .pipe(through2.obj(function (data, enc, cb) {
+              console.log(`consumer 1: ${data.offset}, ${data}`);
+              cb(null, data);
+            }))
+            .pipe(commitStream);
+        });
+      });
+    });
   });
 });
