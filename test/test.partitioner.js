@@ -6,6 +6,7 @@ var DefaultPartitioner = kafka.DefaultPartitioner;
 var RandomPartitioner = kafka.RandomPartitioner;
 var CyclicPartitioner = kafka.CyclicPartitioner;
 var KeyedPartitioner = kafka.KeyedPartitioner;
+var CustomPartitioner = kafka.CustomPartitioner;
 
 function getPartitions (partitioner, partitions, count) {
   var arr = [];
@@ -56,10 +57,10 @@ describe('Partitioner', function () {
         partitions[5].should.equal(2);
       });
 
-      xit('should not modify different partitioners', function () {
+      it('should not modify different partitioners', function () {
         var partitioner2 = new CyclicPartitioner();
-        var partitions1 = getPartitions(partitioner, [0, 1, 2], 1);
-        var partitions2 = getPartitions(partitioner2, [0, 1, 2], 1);
+        var partitions1 = getPartitions(partitioner, [0, 1, 2], 3);
+        var partitions2 = getPartitions(partitioner2, [0, 1, 2], 3);
         partitions1.should.have.length(3);
         partitions2.should.have.length(3);
         partitions1[0].should.equal(0);
@@ -77,6 +78,22 @@ describe('Partitioner', function () {
         partitions.should.have.length(2);
         partitions[0].should.equal(1);
         partitions[1].should.equal(0);
+      });
+    });
+  });
+
+  describe('CustomPartitioner', function () {
+    function getPartition (partitions, key) {
+      return partitions[partitions.length - 1];
+    }
+
+    var partitioner = new CustomPartitioner(getPartition);
+
+    describe('#getPartition', function () {
+      it('should always return the last partition', function () {
+        var partitions = _.uniq(getPartitions(partitioner, [0, 1, 2, 3], 100));
+        partitions.should.have.length(1);
+        partitions.should.containEql(3);
       });
     });
   });

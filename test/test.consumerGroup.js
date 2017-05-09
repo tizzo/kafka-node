@@ -121,14 +121,113 @@ describe('ConsumerGroup', function () {
     });
   });
 
-  describe('Offset Out Of Range', function () {
-    const InvalidConsumerOffsetError = require('../lib/errors/InvalidConsumerOffsetError');
-
-    let consumerGroup = null;
+  describe('Broker offline recovery', function () {
     let sandbox = null;
+    let consumerGroup = null;
+    let fakeClient = null;
+    let ConsumerGroup = null;
+    let clock = null;
+
+    fakeClient = function () {
+      return new EventEmitter();
+    };
+
+    before(function () {
+      ConsumerGroup = proxyquire('../lib/consumerGroup', {
+        './client': fakeClient
+      });
+
+      consumerGroup = new ConsumerGroup({
+        host: 'gibberish',
+        connectOnReady: false
+      }, 'TestTopic');
+    });
 
     beforeEach(function () {
       sandbox = sinon.sandbox.create();
+
+      consumerGroup.client.refreshMetadata = sandbox.stub().yields(null);
+      clock = sandbox.useFakeTimers();
+    });
+
+    afterEach(function () {
+      sandbox.restore();
+    });
+
+    it('should refreshMetadata and connect when broker changes', function () {
+      sandbox.stub(consumerGroup, 'connect');
+      sandbox.spy(consumerGroup, 'pause');
+
+      consumerGroup.ready = false;
+      consumerGroup.reconnectTimer = null;
+      consumerGroup.connecting = undefined;
+
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(50);
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(100);
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(200);
+
+      sinon.assert.calledThrice(consumerGroup.pause);
+      sinon.assert.calledOnce(consumerGroup.client.refreshMetadata);
+      sinon.assert.calledOnce(consumerGroup.connect);
+    });
+
+    it('should not try to connect when broker changes and already connected', function () {
+      sandbox.stub(consumerGroup, 'connect');
+      sandbox.spy(consumerGroup, 'pause');
+      sandbox.stub(consumerGroup, 'fetch');
+
+      consumerGroup.ready = true;
+      consumerGroup.reconnectTimer = null;
+      consumerGroup.connecting = undefined;
+
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(200);
+
+      sinon.assert.notCalled(consumerGroup.connect);
+      sinon.assert.calledOnce(consumerGroup.pause);
+      sinon.assert.calledOnce(consumerGroup.fetch);
+      sinon.assert.calledOnce(consumerGroup.client.refreshMetadata);
+      consumerGroup.paused.should.be.false;
+    });
+
+    it('should try to connect when broker changes and a reconnect is scheduled', function () {
+      let stub = sandbox.stub(consumerGroup, 'connect');
+      sinon.stub(global, 'clearTimeout');
+
+      consumerGroup.ready = false;
+      consumerGroup.reconnectTimer = 1234;
+      consumerGroup.connecting = undefined;
+
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(200);
+
+      should(consumerGroup.reconnectTimer).be.null;
+      sinon.assert.calledOnce(clearTimeout);
+      sinon.assert.calledOnce(stub);
+      global.clearTimeout.restore();
+    });
+  });
+
+  describe('Offset Out Of Range', function () {
+    const InvalidConsumerOffsetError = require('../lib/errors/InvalidConsumerOffsetError');
+
+    let ConsumerGroup = null;
+    let consumerGroup = null;
+    let sandbox = null;
+    let fakeClient = null;
+
+    beforeEach(function () {
+      sandbox = sinon.sandbox.create();
+
+      fakeClient = sandbox.stub().returns(new EventEmitter());
+
+      ConsumerGroup = proxyquire('../lib/consumerGroup', {
+        './client': fakeClient
+      });
+
       consumerGroup = new ConsumerGroup({
         host: host,
         connectOnReady: false,
@@ -185,7 +284,7 @@ describe('ConsumerGroup', function () {
       const TOPIC_NAME = 'test-topic';
       const NEW_OFFSET = 657;
 
-      sandbox.stub(consumerGroup, 'resume', function () {
+      sandbox.stub(consumerGroup, 'resume').callsFake(function () {
         sinon.assert.calledOnce(consumerGroup.pause);
         sinon.assert.calledWithExactly(consumerGroup.offset.fetch, [{topic: TOPIC_NAME, partition: '0', time: -1}], sinon.match.func);
         sinon.assert.calledWithExactly(consumerGroup.setOffset, TOPIC_NAME, '0', NEW_OFFSET);
@@ -218,7 +317,7 @@ describe('ConsumerGroup', function () {
       const TOPIC_NAME = 'test-topic';
       const NEW_OFFSET = 500;
 
-      sandbox.stub(consumerGroup, 'resume', function () {
+      sandbox.stub(consumerGroup, 'resume').callsFake(function () {
         sinon.assert.calledWithExactly(consumerGroup.offset.fetch, [{topic: TOPIC_NAME, partition: '0', time: -2}], sinon.match.func);
         sinon.assert.calledWithExactly(consumerGroup.setOffset, TOPIC_NAME, '0', NEW_OFFSET);
         consumerGroup.topicPayloads[0].offset.should.be.eql(NEW_OFFSET);
@@ -261,8 +360,11 @@ describe('ConsumerGroup', function () {
       }, 'TestTopic');
     });
 
-    afterEach(function () {
-      sandbox.restore();
+    afterEach(function (done) {
+      consumerGroup.close(function () {
+        sandbox.restore();
+        done();
+      });
     });
 
     it('make an attempt to leave the group but do not error out when it fails', function (done) {
