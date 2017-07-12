@@ -1,11 +1,14 @@
 'use strict';
 
-var sinon = require('sinon');
-var HighLevelConsumer = require('../lib/highLevelConsumer');
-var FakeClient = require('./mocks/mockClient');
-var should = require('should');
-var InvalidConfigError = require('../lib/errors/InvalidConfigError');
-var FailedToRegisterConsumerError = require('../lib/errors/FailedToRegisterConsumerError');
+const sinon = require('sinon');
+const HighLevelConsumer = require('../lib/highLevelConsumer');
+const FakeClient = require('./mocks/mockClient');
+const should = require('should');
+const InvalidConfigError = require('../lib/errors/InvalidConfigError');
+const FailedToRegisterConsumerError = require('../lib/errors/FailedToRegisterConsumerError');
+const _ = require('lodash');
+const Client = require('../lib/client');
+const Producer = require('../lib/producer');
 
 describe('HighLevelConsumer', function () {
   describe('#close', function (done) {
@@ -314,13 +317,10 @@ describe('HighLevelConsumer', function () {
 
   describe('Verify no duplicate messages are being consumed', function () {
     this.timeout(26000);
-    var _ = require('lodash');
-    var Client = require('../lib/client');
-    var Producer = require('../lib/producer');
     var uuid = require('uuid');
     var host = process.env['KAFKA_TEST_HOST'] || '';
     var topic = 'DuplicateMessageTest';
-    var numberOfMessages = 20000;
+    const numberOfMessages = 20000;
 
     var highLevelConsumer;
 
@@ -328,7 +328,7 @@ describe('HighLevelConsumer', function () {
       var client = new Client(host, uuid.v4());
       var producer = new Producer(client, { requireAcks: 1 });
 
-      producer.on('ready', function () {
+      client.on('connect', function () {
         var messages = _.times(times, uuid.v4);
         producer.send([{topic: topic, messages: messages}], done);
       });
@@ -367,6 +367,69 @@ describe('HighLevelConsumer', function () {
     }
   });
 
+  describe('#updateOffsets', function () {
+    let client, highLevelConsumer, sandbox;
+
+    beforeEach(function () {
+      client = new FakeClient();
+
+      highLevelConsumer = new HighLevelConsumer(
+        client,
+        [ {topic: 'fake-topic'} ]
+      );
+
+      clearTimeout(highLevelConsumer.checkPartitionOwnershipInterval);
+
+      sandbox = sinon.sandbox.create();
+    });
+
+    afterEach(function () {
+      highLevelConsumer.close(function () {});
+      sandbox.restore();
+      client = null;
+      highLevelConsumer = null;
+    });
+
+    it('should not call commit if topic and partition has not changed', function () {
+      sandbox.stub(highLevelConsumer, 'sendOffsetCommitRequest');
+      sandbox.spy(highLevelConsumer, 'autoCommit');
+
+      highLevelConsumer.updateOffsets({'fake-topic': {}});
+
+      highLevelConsumer.options.autoCommit.should.be.true;
+      should(highLevelConsumer.needToCommit).be.empty;
+      sinon.assert.calledOnce(highLevelConsumer.autoCommit);
+      sinon.assert.notCalled(highLevelConsumer.sendOffsetCommitRequest);
+    });
+
+    it('should call commit if topic and partition has changed', function () {
+      sandbox.spy(highLevelConsumer, 'autoCommit');
+      sandbox.stub(highLevelConsumer, 'sendOffsetCommitRequest');
+      highLevelConsumer.topicPayloads = [
+        {
+          topic: 'fake-topic',
+          partition: '0',
+          offset: 0
+        },
+        {
+          topic: 'fake-topic',
+          partition: '1',
+          offset: 0
+        }
+      ];
+
+      highLevelConsumer.updateOffsets({'fake-topic': {
+        '0': 28
+      }});
+
+      highLevelConsumer.options.autoCommit.should.be.true;
+      highLevelConsumer.needToCommit.should.be.false;
+      sinon.assert.calledOnce(highLevelConsumer.autoCommit);
+      sinon.assert.calledOnce(highLevelConsumer.sendOffsetCommitRequest);
+      _.find(highLevelConsumer.topicPayloads, {topic: 'fake-topic', partition: '0'}).offset.should.be.eql(29);
+    });
+  });
+
   describe('rebalance', function () {
     var client,
       highLevelConsumer,
@@ -398,7 +461,7 @@ describe('HighLevelConsumer', function () {
       });
 
       function verifyPendingRebalances (event, done) {
-        sandbox.stub(client, 'refreshMetadata', function (topicNames, callback) {
+        sandbox.stub(client, 'refreshMetadata').callsFake(function (topicNames, callback) {
           highLevelConsumer.rebalancing.should.be.true;
           highLevelConsumer.pendingRebalances.should.be.eql(0);
           event();
@@ -433,19 +496,19 @@ describe('HighLevelConsumer', function () {
     it('should emit rebalanced event and clear rebalancing flag only after offsets are updated', function (done) {
       client.emit('ready');
 
-      sinon.stub(highLevelConsumer, 'rebalanceAttempt', function (oldTopicPayloads, cb) {
+      sinon.stub(highLevelConsumer, 'rebalanceAttempt').callsFake(function (oldTopicPayloads, cb) {
         highLevelConsumer.topicPayloads = [{topic: 'fake-topic', partition: 0, offset: 0, maxBytes: 1048576, metadata: 'm'}];
         cb();
       });
 
       // verify rebalancing is false until rebalance finishes
-      var refreshMetadataStub = sandbox.stub(client, 'refreshMetadata', function (topicNames, cb) {
+      var refreshMetadataStub = sandbox.stub(client, 'refreshMetadata').callsFake(function (topicNames, cb) {
         highLevelConsumer.rebalancing.should.be.true;
         setImmediate(cb);
       });
 
       highLevelConsumer.on('registered', function () {
-        var sendOffsetFetchRequestStub = sandbox.stub(client, 'sendOffsetFetchRequest', function (groupId, payloads, cb) {
+        var sendOffsetFetchRequestStub = sandbox.stub(client, 'sendOffsetFetchRequest').callsFake(function (groupId, payloads, cb) {
           highLevelConsumer.rebalancing.should.be.true;
           // wait for the results
           setImmediate(function () {
@@ -472,13 +535,13 @@ describe('HighLevelConsumer', function () {
     it('should emit error and clear rebalancing flag if fetchOffset failed', function (done) {
       client.emit('ready');
 
-      sinon.stub(highLevelConsumer, 'rebalanceAttempt', function (oldTopicPayloads, cb) {
+      sinon.stub(highLevelConsumer, 'rebalanceAttempt').callsFake(function (oldTopicPayloads, cb) {
         highLevelConsumer.topicPayloads = [{topic: 'fake-topic', partition: 0, offset: 0, maxBytes: 1048576, metadata: 'm'}];
         cb();
       });
 
       highLevelConsumer.on('registered', function () {
-        sandbox.stub(client, 'sendOffsetFetchRequest', function (groupId, payloads, cb) {
+        sandbox.stub(client, 'sendOffsetFetchRequest').callsFake(function (groupId, payloads, cb) {
           setImmediate(cb, new Error('Fetching offset failed'));
         });
 
@@ -499,7 +562,7 @@ describe('HighLevelConsumer', function () {
     it('should ignore fetch calls from "done" event handler during rebalance', function (done) {
       client.emit('ready');
 
-      sinon.stub(highLevelConsumer, 'rebalanceAttempt', function (oldTopicPayloads, cb) {
+      sinon.stub(highLevelConsumer, 'rebalanceAttempt').callsFake(function (oldTopicPayloads, cb) {
         highLevelConsumer.topicPayloads = [{topic: 'fake-topic', partition: 0, offset: 0, maxBytes: 1048576, metadata: 'm'}];
         cb();
       });
@@ -507,7 +570,7 @@ describe('HighLevelConsumer', function () {
       var sendFetchRequestSpy = sandbox.spy(client, 'sendFetchRequest');
       var fetchSpy = sandbox.spy(highLevelConsumer, 'fetch');
 
-      sandbox.stub(client, 'sendOffsetFetchRequest', function (groupId, payloads, cb) {
+      sandbox.stub(client, 'sendOffsetFetchRequest').callsFake(function (groupId, payloads, cb) {
         highLevelConsumer.rebalancing.should.be.true;
         highLevelConsumer.ready = true;
         highLevelConsumer.paused = false;

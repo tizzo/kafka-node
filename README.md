@@ -18,6 +18,7 @@ Kafka-node is a Node.js client with Zookeeper integration for Apache Kafka 0.8.1
 - [Features](#features)
 - [Install Kafka](#install-kafka)
 - [API](#api)
+  - [KafkaClient](#kafkaclient)
   - [Client](#client)
   - [Producer](#producer)
   - [HighLevelProducer](#highlevelproducer)
@@ -34,6 +35,8 @@ Kafka-node is a Node.js client with Zookeeper integration for Apache Kafka 0.8.1
   - [HighLevelConsumer does not consume on all partitions](#highlevelconsumer-does-not-consume-on-all-partitions)
   - [How to throttle messages / control the concurrency of processing messages](#how-to-throttle-messages--control-the-concurrency-of-processing-messages)
   - [How do I produce and consume binary data?](#how-do-i-produce-and-consume-binary-data)
+  - [What are these node-gyp and snappy errors?](#what-are-these-node-gyp-and-snappy-errors)
+  - [How do I configure the log output?](#how-do-i-configure-the-log-output)
 - [Running Tests](#running-tests)
 - [LICENSE - "MIT"](#license---mit)
 
@@ -45,11 +48,37 @@ Kafka-node is a Node.js client with Zookeeper integration for Apache Kafka 0.8.1
 * Manage topic Offsets
 * SSL connections to brokers (Kafka 0.9+)
 * Consumer Groups managed by Kafka coordinator (Kafka 0.9+)
+* Connect directly to brokers (Kafka 0.9+)
 
 # Install Kafka
 Follow the [instructions](http://kafka.apache.org/documentation.html#quickstart) on the Kafka wiki to build Kafka 0.8 and get a test broker up and running.
 
 # API
+
+## KafkaClient
+
+New KafkaClient connects directly to Kafka brokers instead of connecting to zookeeper for broker discovery.
+
+### New Features
+
+* Kafka **ONLY** no zookeeper
+* Added request timeout
+* Added connection timeout and retry
+
+### Notable differences
+
+* Constructor accepts an single options object (see below)
+* Unlike the original `Client` `KafkaClient` will not emit socket errors it will do its best to recover and only emit errors when it has exhausted its recovery attempts
+* `ready` event is only emitted after successful connection to a broker and metadata request to that broker
+* `Client` uses zookeeper to discover the SSL kafka host/port since we connect directly to the broker this host/port for SSL need to be correct
+
+### Options
+* `kafkaHost` : A string of kafka broker/host combination delimited by comma for example: `kafka-1.us-east-1.myapp.com:9093,kafka-2.us-east-1.myapp.com:9093,kafka-3.us-east-1.myapp.com:9093` default: `localhost:9092`.
+* `connectTimeout` : in ms it takes to wait for a successful connection before moving to the next host default: `10000`
+* `requestTimeout` : in ms for a kafka request to timeout default: `30000`
+* `autoConnect` : automatically connect when KafkaClient is instantiated otherwise you need to manually call `connect` default: `true`
+* `connectRetryOptions` : object hash that applies to the initial connection. see [retry](https://www.npmjs.com/package/retry) module for these options.
+
 ## Client
 ### Client(connectionString, clientId, [zkOptions], [noAckBatchOptions], [sslOptions])
 * `connectionString`: Zookeeper connection string, default `localhost:2181/`
@@ -64,7 +93,7 @@ Closes the connection to Zookeeper and the brokers so that the node process can 
 * `cb`: **Function**, the callback
 
 ## Producer
-### Producer(client, [options])
+### Producer(client, [options], [customPartitioner])
 * `client`: client which keeps a connection with the Kafka server.
 * `options`: options for producer,
 
@@ -74,7 +103,7 @@ Closes the connection to Zookeeper and the brokers so that the node process can 
     requireAcks: 1,
     // The amount of time in milliseconds to wait for all acks before considered, default 100ms
     ackTimeoutMs: 100,
-    // Partitioner type (default = 0, random = 1, cyclic = 2, keyed = 3), default 0
+    // Partitioner type (default = 0, random = 1, cyclic = 2, keyed = 3, custom = 4), default 0
     partitionerType: 2
 }
 ```
@@ -160,7 +189,7 @@ producer.createTopics(['t'], function (err, data) {});// Simply omit 2nd arg
 
 
 ## HighLevelProducer
-### HighLevelProducer(client, [options])
+### HighLevelProducer(client, [options], [customPartitioner])
 * `client`: client which keeps a connection with the Kafka server. Round-robins produce requests to the available topic partitions
 * `options`: options for producer,
 
@@ -170,7 +199,7 @@ producer.createTopics(['t'], function (err, data) {});// Simply omit 2nd arg
     requireAcks: 1,
     // The amount of time in milliseconds to wait for all acks before considered, default 100ms
     ackTimeoutMs: 100,
-    // Partitioner type (default = 0, random = 1, cyclic = 2, keyed = 3), default 2
+    // Partitioner type (default = 0, random = 1, cyclic = 2, keyed = 3, custom = 4), default 2
     partitionerType: 3
 }
 ```
@@ -272,7 +301,8 @@ producer.createTopics(['t'], function (err, data) {});// Simply omit 2nd arg
     // If set true, consumer will fetch message from the given offset in the payloads
     fromOffset: false,
     // If set to 'buffer', values will be returned as raw buffer objects.
-    encoding: 'utf8'
+    encoding: 'utf8',
+    keyEncoding: 'utf-8'
 }
 ```
 Example:
@@ -552,7 +582,7 @@ The new consumer group uses Kafka broker coordinators instead of Zookeeper to ma
 
 ### Coming from the highLevelConsumer
 
-API is very similar to `HighLevelConsumer` with some exceptions noted below:
+API is very similar to `HighLevelConsumer` since it extends directly from HLC so many of the same options will apply with some exceptions noted below:
 
 * In an effort to make the API simpler you no longer need to create a `client` this is done inside the `ConsumerGroup`
 * consumer ID do not need to be defined. There's a new ID to represent consumers called *member ID* and this is assigned to consumer after joining the group
@@ -563,7 +593,8 @@ API is very similar to `HighLevelConsumer` with some exceptions noted below:
 
 ```js
 var options = {
-  host: 'zookeeper:2181',
+  host: 'zookeeper:2181',  // zookeeper host omit if connecting directly to broker (see kafkaHost below)
+  kafkaHost: 'broker:9092', // connect directly to kafka broker (instantiates a KafkaClient)
   zk : undefined,   // put client zk settings if you need them (see Client)
   batch: undefined, // put client batch settings if you need them (see Client)
   ssl: true, // optional (defaults to false) or tls options hash
@@ -862,8 +893,13 @@ export DEBUG=kafka-node:*
 Call `client.loadMetadataForTopics` with a blank topic array to get the entire list of available topics (and available brokers).
 
 ```js
-client.loadMetadataForTopics([], function (error, results) {
-  console.log('%j', _.get(results, '1.metadata'));
+client.once('connect', function () {
+	client.loadMetadataForTopics([], function (error, results) {
+	  if (error) {
+	  	return console.error(error);
+	  }
+	  console.log('%j', _.get(results, '1.metadata'));
+	});
 });
 ```
 
@@ -925,6 +961,51 @@ Set the `messages` attribute in the `payload` to a `Buffer`. `TypedArrays` such 
 
 Reference to issue [#470](https://github.com/SOHU-Co/kafka-node/issues/470) [#514](https://github.com/SOHU-Co/kafka-node/issues/514)
 
+## What are these node-gyp and snappy errors?
+
+Snappy is a optional compression library. Windows users have reported issues with installing it while running `npm install`. It's **optional** in kafka-node and can be skipped by using the `--no-optional` flag (though errors from it should not fail the install).
+
+```bash
+npm install kafka-node --no-optional --save
+```
+
+Keep in mind if you try to use snappy without installing it `kafka-node` will throw a runtime exception.
+
+## How do I configure the log output?
+
+By default, `kafka-node` uses [debug](https://github.com/visionmedia/debug) to log important information. To integrate `kafka-node`'s log output into an application, it is possible to set a logger provider. This enables filtering of log levels and easy redirection of output streams.
+
+### What is a logger provider?
+
+A logger provider is a function which takes the name of a logger and returns a logger implementation. For instance, the following code snippet shows how a logger provider for the global `console` object could be written:
+
+```javascript
+function consoleLoggerProvider (name) {
+  // do something with the name
+  return {
+    debug: console.debug.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console)
+  };
+}
+```
+
+The logger interface with its `debug`, `info`, `warn` and `error` methods expects format string support as seen in `debug` or the JavaScript `console` object. Many commonly used logging implementations cover this API, e.g. bunyan, pino or winston.
+
+### How do I set a logger provider?
+
+For performance reasons, initialization of the `kafka-node` module creates all necessary loggers. This means that custom logger providers need to be set *before requiring the `kafka-node` module*. The following example shows how this can be done:
+
+```javascript
+// first configure the logger provider
+const kafkaLogging = require('kafka-node/logging');
+kafkaLogging.setLoggerProvider(consoleLoggerProvider);
+
+// then require kafka-node and continue as normal
+const kafka = require('kafka-node');
+```
+
 # Running Tests
 
 ### Install Docker
@@ -936,6 +1017,23 @@ On the Mac install [Docker for Mac](https://docs.docker.com/engine/installation/
 ```bash
 npm test
 ```
+
+### Using different versions of Kafka
+
+Achieved using the `KAFKA_VERSION` environment variable.
+
+```bash
+# Runs "latest" kafka on docker hub*
+npm test
+
+KAFKA_VERSION=0.8 npm test
+
+KAFKA_VERSION=0.9 npm test
+
+KAFKA_VERSION=0.10 npm test
+```
+
+*See Docker hub [tags](https://hub.docker.com/r/wurstmeister/kafka/tags/) entry for which version is considered `latest`.
 
 ### Stop Docker
 

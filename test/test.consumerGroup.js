@@ -7,6 +7,8 @@ const host = process.env['KAFKA_TEST_HOST'] || '';
 const proxyquire = require('proxyquire').noCallThru();
 const EventEmitter = require('events').EventEmitter;
 const _ = require('lodash');
+const uuid = require('uuid');
+const async = require('async');
 
 describe('ConsumerGroup', function () {
   describe('#constructor', function () {
@@ -121,14 +123,113 @@ describe('ConsumerGroup', function () {
     });
   });
 
-  describe('Offset Out Of Range', function () {
-    const InvalidConsumerOffsetError = require('../lib/errors/InvalidConsumerOffsetError');
-
-    let consumerGroup = null;
+  describe('Broker offline recovery', function () {
     let sandbox = null;
+    let consumerGroup = null;
+    let fakeClient = null;
+    let ConsumerGroup = null;
+    let clock = null;
+
+    fakeClient = function () {
+      return new EventEmitter();
+    };
+
+    before(function () {
+      ConsumerGroup = proxyquire('../lib/consumerGroup', {
+        './client': fakeClient
+      });
+
+      consumerGroup = new ConsumerGroup({
+        host: 'gibberish',
+        connectOnReady: false
+      }, 'TestTopic');
+    });
 
     beforeEach(function () {
       sandbox = sinon.sandbox.create();
+
+      consumerGroup.client.refreshMetadata = sandbox.stub().yields(null);
+      clock = sandbox.useFakeTimers();
+    });
+
+    afterEach(function () {
+      sandbox.restore();
+    });
+
+    it('should refreshMetadata and connect when broker changes', function () {
+      sandbox.stub(consumerGroup, 'connect');
+      sandbox.spy(consumerGroup, 'pause');
+
+      consumerGroup.ready = false;
+      consumerGroup.reconnectTimer = null;
+      consumerGroup.connecting = undefined;
+
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(50);
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(100);
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(200);
+
+      sinon.assert.calledThrice(consumerGroup.pause);
+      sinon.assert.calledOnce(consumerGroup.client.refreshMetadata);
+      sinon.assert.calledOnce(consumerGroup.connect);
+    });
+
+    it('should not try to connect when broker changes and already connected', function () {
+      sandbox.stub(consumerGroup, 'connect');
+      sandbox.spy(consumerGroup, 'pause');
+      sandbox.stub(consumerGroup, 'fetch');
+
+      consumerGroup.ready = true;
+      consumerGroup.reconnectTimer = null;
+      consumerGroup.connecting = undefined;
+
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(200);
+
+      sinon.assert.notCalled(consumerGroup.connect);
+      sinon.assert.calledOnce(consumerGroup.pause);
+      sinon.assert.calledOnce(consumerGroup.fetch);
+      sinon.assert.calledOnce(consumerGroup.client.refreshMetadata);
+      consumerGroup.paused.should.be.false;
+    });
+
+    it('should try to connect when broker changes and a reconnect is scheduled', function () {
+      let stub = sandbox.stub(consumerGroup, 'connect');
+      sinon.stub(global, 'clearTimeout');
+
+      consumerGroup.ready = false;
+      consumerGroup.reconnectTimer = 1234;
+      consumerGroup.connecting = undefined;
+
+      consumerGroup.client.emit('brokersChanged');
+      clock.tick(200);
+
+      should(consumerGroup.reconnectTimer).be.null;
+      sinon.assert.calledOnce(clearTimeout);
+      sinon.assert.calledOnce(stub);
+      global.clearTimeout.restore();
+    });
+  });
+
+  describe('Offset Out Of Range', function () {
+    const InvalidConsumerOffsetError = require('../lib/errors/InvalidConsumerOffsetError');
+
+    let ConsumerGroup = null;
+    let consumerGroup = null;
+    let sandbox = null;
+    let fakeClient = null;
+
+    beforeEach(function () {
+      sandbox = sinon.sandbox.create();
+
+      fakeClient = sandbox.stub().returns(new EventEmitter());
+
+      ConsumerGroup = proxyquire('../lib/consumerGroup', {
+        './client': fakeClient
+      });
+
       consumerGroup = new ConsumerGroup({
         host: host,
         connectOnReady: false,
@@ -185,7 +286,7 @@ describe('ConsumerGroup', function () {
       const TOPIC_NAME = 'test-topic';
       const NEW_OFFSET = 657;
 
-      sandbox.stub(consumerGroup, 'resume', function () {
+      sandbox.stub(consumerGroup, 'resume').callsFake(function () {
         sinon.assert.calledOnce(consumerGroup.pause);
         sinon.assert.calledWithExactly(consumerGroup.offset.fetch, [{topic: TOPIC_NAME, partition: '0', time: -1}], sinon.match.func);
         sinon.assert.calledWithExactly(consumerGroup.setOffset, TOPIC_NAME, '0', NEW_OFFSET);
@@ -218,7 +319,7 @@ describe('ConsumerGroup', function () {
       const TOPIC_NAME = 'test-topic';
       const NEW_OFFSET = 500;
 
-      sandbox.stub(consumerGroup, 'resume', function () {
+      sandbox.stub(consumerGroup, 'resume').callsFake(function () {
         sinon.assert.calledWithExactly(consumerGroup.offset.fetch, [{topic: TOPIC_NAME, partition: '0', time: -2}], sinon.match.func);
         sinon.assert.calledWithExactly(consumerGroup.setOffset, TOPIC_NAME, '0', NEW_OFFSET);
         consumerGroup.topicPayloads[0].offset.should.be.eql(NEW_OFFSET);
@@ -261,8 +362,11 @@ describe('ConsumerGroup', function () {
       }, 'TestTopic');
     });
 
-    afterEach(function () {
-      sandbox.restore();
+    afterEach(function (done) {
+      consumerGroup.close(function () {
+        sandbox.restore();
+        done();
+      });
     });
 
     it('make an attempt to leave the group but do not error out when it fails', function (done) {
@@ -619,6 +723,18 @@ describe('ConsumerGroup', function () {
     });
   });
 
+  describe('KafkaClient support', function () {
+    it('should throw error if migration option is used with KafkaClient', function () {
+      should.throws(function () {
+        // eslint-disable-next-line no-new
+        new ConsumerGroup({
+          kafkaHost: 'localhost:9092',
+          migrateHLC: true
+        }, 'TestTopic');
+      });
+    });
+  });
+
   describe('#scheduleReconnect', function () {
     var consumerGroup, sandbox;
 
@@ -674,5 +790,67 @@ describe('ConsumerGroup', function () {
       sandbox.clock.tick(10000);
       sinon.assert.calledOnce(consumerGroup.connect);
     });
+  });
+
+  it('should not commit when autoCommit is disabled', function (done) {
+    const topic = uuid.v4();
+    const groupId = uuid.v4();
+
+    const messages = _.times(5, function () {
+      return uuid.v4();
+    });
+
+    function addMessages (done) {
+      const Client = require('../lib/client');
+      const Producer = require('../lib/producer');
+
+      const client = new Client(host);
+      const producer = new Producer(client);
+
+      async.series([
+        function (callback) {
+          client.createTopics([topic], true, callback);
+        },
+        function (callback) {
+          if (producer.ready) {
+            return callback();
+          }
+          producer.once('ready', callback);
+        },
+        function (callback) {
+          producer.send([{topic: topic, messages: messages}], callback);
+        },
+        function (callback) {
+          producer.close(callback);
+        }
+      ], done);
+    }
+
+    function confirmMessages (done) {
+      const left = messages.slice();
+      const consumerGroup = new ConsumerGroup({
+        fromOffset: 'earliest',
+        groupId: groupId,
+        sessionTimeout: 8000,
+        autoCommit: false
+      }, topic);
+
+      async.series([
+        function (callback) {
+          consumerGroup.on('message', function (data) {
+            _.pull(left, data.value);
+
+            if (left.length === 0) {
+              callback();
+            }
+          });
+        },
+        function (callback) {
+          consumerGroup.close(callback);
+        }
+      ], done);
+    }
+
+    async.series([addMessages, confirmMessages, confirmMessages], done);
   });
 });
